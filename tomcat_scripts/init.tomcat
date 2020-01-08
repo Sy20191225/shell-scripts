@@ -1,0 +1,141 @@
+#!/bin/sh
+# Tomcat init script
+
+
+PORT=8280
+MPORT=$(expr $PORT + 2)
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+export CATALINA_TMPDIR=/data/var/lib/tomcat${PORT}/tmp
+DAEMON=/srv/tomcat${PORT}/bin/catalina.sh
+USER=www-data
+SHUTDOWN_WAIT=30
+PID_FILE=/data/var/run/tomcat${PORT}.pid
+
+[ -f $DAEMON ] || { echo "tomcat7 isn't ready. Exit!" ; exit 1; }
+
+touch $PID_FILE || { echo "need root to run!"; exit 1; }
+chown $USER $PID_FILE
+
+SHUTDOW_NOW=0
+[ $# -eq 2 ] && [ $2 = '-now' ] && SHUTDOW_NOW=1
+
+tomcat_pid() {
+    pid=$(lsof -i :$PORT | grep TCP | awk '{ print $2}')
+    [ -z "$pid" ] && pid=$(ps aux | grep tomcat$PORT | grep -v grep | grep Bootstrap | awk '{ print $2 }')
+    echo $pid
+}
+
+is_running() {
+    [ -z "$(tomcat_pid)" ] && return 1
+    return 0
+}
+
+is_started() {
+    tport=$(lsof -i :$PORT | grep TCP | awk '{ print $2}')
+    mport=$(lsof -i :$MPORT | grep TCP | awk '{ print $2}')
+    [ -n "$tport" -a -n "$mport" ] && return 0
+    return 1
+}
+
+is_stopped() {
+    is_running && return 1
+    return 0
+}
+
+do_start() {
+    pid=$(tomcat_pid)
+    if [ -n "$pid" ] 
+    then
+        echo "Tomcat is already running (pid: $pid)"
+    else
+        # Start tomcat
+        echo "Starting tomcat"
+        ulimit -n 100000
+        umask 007
+        /bin/su $USER -s /bin/bash -c "$DAEMON start"
+
+        # wait until started or timeout
+        count=0
+        echo -n "Starting tomcat$PORT..."
+        until is_started || [ $count -gt 60 ]; do
+            echo -n "."
+            sleep 1
+        done
+
+        pid=$(tomcat_pid)
+        if [ -n "$pid" ]
+        then
+            echo $pid > $PID_FILE
+            echo "started"
+        else
+            echo "failed to start!"
+        fi
+    fi
+
+    return 0
+}
+
+do_stop() {
+    pid=$(tomcat_pid)
+    if [ -n "$pid" ]; then
+        kwait=$SHUTDOWN_WAIT
+        is_started || SHUTDOW_NOW=1  # stop right now if no port
+
+        if [ $SHUTDOW_NOW = "1" ]; then
+            [ "x$pid" = "x" ] || kill -9 $pid > /dev/null 2>&1
+            sleep 1
+            echo "Stopped tomcat$PORT right now by kill"
+        else
+            echo "dump tomcat threads ... "
+            kill -3 $pid && sleep 1
+            /bin/su -l $USER -s /bin/bash -c "$DAEMON stop"
+
+            count=0
+            echo -n "Stopping tomcat$PORT..."
+            until is_stopped || [ $count -gt $kwait ]; do
+                echo -n "."
+                sleep 1
+                count=`expr $count + 1`
+            done
+
+            if is_running; then
+                echo "timeout...killed"
+                pid=$(tomcat_pid)
+                [ "x$pid" = "x" ] || kill -9 $pid > /dev/null 2>&1
+            else
+                echo "tomcat stopped"
+            fi
+        fi
+    else
+        echo "Tomcat is not running"
+    fi
+
+    return 0
+}
+
+
+case "$1" in
+        start)
+                do_start
+                ;;
+        stop)
+                do_stop
+                ;;
+        restart)
+                is_running && do_stop
+        do_start
+                ;;
+    status)
+        pid=$(tomcat_pid)
+        if [ -n "$pid" ]
+        then
+            echo "Tomcat is running with pid: $pid"
+        else
+            echo "Tomcat is not running"
+        fi
+        ;; 
+    *)
+                echo "Usage: $NAME {start|stop|restart}" >&2
+                exit 3
+                ;;
+esac
